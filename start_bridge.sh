@@ -1,3 +1,2 @@
-#!/usr/bin/env bash
-cd "$(dirname "$0")"
+#!/bin/bash
 python3 tiktok_bridge.py

@@ -37,7 +37,7 @@ except ValueError:
     PORT = 8765
 
 ALLOWED_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg"}
-MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB — лимит TikTok Studio
+MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4 GB
 CHUNK_SIZE = 64 * 1024
 
 
@@ -52,11 +52,9 @@ def _log(level: str, msg: str) -> None:
 class BridgeHandler(http.server.BaseHTTPRequestHandler):
     server_version = "TikTokBridge/1.1"
 
-    # silence default stderr logging — we have our own
     def log_message(self, format, *args):
         return
 
-    # ---------- helpers ----------
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -85,10 +83,8 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _validate_path(raw: str) -> tuple[bool, str, str]:
-        """Возвращает (ok, absolute_path, error_message)."""
         if not raw:
             return False, "", "No path provided"
-        # Защита от NUL-символов
         if "\x00" in raw:
             return False, "", "Invalid path"
         try:
@@ -107,7 +103,6 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             return False, abs_path, f"Stat failed: {e}"
         return True, abs_path, ""
 
-    # ---------- HTTP methods ----------
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
@@ -165,7 +160,6 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    # ---------- file streaming with Range support ----------
     def _serve_file(self, abs_path: str) -> None:
         mime_type, _ = mimetypes.guess_type(abs_path)
         if not mime_type:

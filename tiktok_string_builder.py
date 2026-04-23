@@ -405,7 +405,6 @@ class StringBuilder(QMainWindow):
             date = self.date_edit.dateTime().toString("yyyy-MM-dd HH:mm")
         caption = self.caption_edit.toPlainText().strip().replace("\n", " ").replace("|", "/")
 
-        # валидация пути — подсветим в статусе
         if path:
             ext = os.path.splitext(path)[1].lower()
             if not os.path.isfile(path):
@@ -491,7 +490,6 @@ class StringBuilder(QMainWindow):
         hist.insert(0, line)
         hist = hist[:HISTORY_LIMIT]
         self.cfg["history"] = hist
-        # refresh combo
         self.history_combo.blockSignals(True)
         self.history_combo.clear()
         self.history_combo.addItem("— выбери прошлую строку —", "")
