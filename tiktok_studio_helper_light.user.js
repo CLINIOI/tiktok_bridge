@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok Studio Upload Helper LIGHT
 // @namespace    http://tampermonkey.net/
-// @version      2.8-timings
+// @version      2.9-fix
 // @description  Панель для TikTok Studio: разбор строки, вставка описания, отложенная публикация и загрузка видео через локальный bridge. Ручная настройка таймингов.
 // @author       FANTOM
 // @match        https://www.tiktok.com/*
@@ -29,8 +29,8 @@
     const DEFAULT_TIMINGS = {
         posleZagruzki:      3000,   // Ожидание после старта загрузки видео
         posleZapolneniya:   2000,   // Ожидание после вставки текста
-        poslePereklucheniya:2000,   // Ожидание после клика "Запланировать"
-        posleDaty:          400,    // Ожидание после вставки даты
+        poslePereklucheniya:3000,   // Макс. ожидание полей даты/времени после клика "Запланировать"
+        posleDaty:          600,    // Ожидание после вставки даты
         mezhduPovtorami:    500,    // Интервал между попытками найти input[type=file]
         dostupElemeta:      1200,   // Ожидание инициализации страницы при загрузке
         posleNavigacii:     1500,   // Ожидание после смены URL
@@ -97,11 +97,10 @@
                h.indexOf('/upload') !== -1;
     }
 
-    // Описания таймингов на русском для отображения в панели
     const TIMING_LABELS = {
         posleZagruzki:       'После старта загрузки видео (мс)',
         posleZapolneniya:    'После вставки текста (мс)',
-        poslePereklucheniya: 'После клика "Запланировать" (мс)',
+        poslePereklucheniya: 'Макс. ожидание полей даты/времени (мс)',
         posleDaty:           'После вставки даты (мс)',
         mezhduPovtorami:     'Интервал поиска input[file] (мс)',
         dostupElemeta:       'Ожидание инициализации страницы (мс)',
@@ -173,7 +172,7 @@
 '#' + PANEL_ID + ' .tm-actions{display:flex;gap:6px;margin-top:4px}' +
 '#' + PANEL_ID + ' .tm-actions button{flex:1;font-size:11px;padding:5px 6px}' +
 '</style>' +
-'<div class="hdr"><div class="ttl">TT Helper LIGHT v2.8</div>' +
+'<div class="hdr"><div class="ttl">TT Helper LIGHT v2.9</div>' +
 '<button class="mini" id="tt-light-toggle" title="Свернуть">—</button></div>' +
 '<div class="body">' +
 '  <div class="box status info" id="tt-light-bridge">Bridge: проверяется…</div>' +
@@ -205,7 +204,7 @@
 '</div>';
 
         document.body.appendChild(panel);
-        log('script started v2.8-timings');
+        log('script started v2.9-fix');
 
         const saved = storageGet(STORAGE_KEY, '');
         if (saved) document.getElementById('tt-light-input').value = saved;
@@ -220,7 +219,6 @@
             storageSet(STORAGE_KEY, e.target.value);
         });
 
-        // Раскрытие/скрытие секции таймингов
         document.getElementById('tt-tm-toggle').addEventListener('click', function() {
             const body = document.getElementById('tt-tm-body');
             const arrow = document.getElementById('tt-tm-arrow');
@@ -228,7 +226,6 @@
             arrow.textContent = body.classList.contains('hidden') ? '▶' : '▼';
         });
 
-        // Сохранить тайминги
         document.getElementById('tt-tm-save').addEventListener('click', function() {
             Object.keys(DEFAULT_TIMINGS).forEach(function(k) {
                 const inp = document.getElementById('tm-' + k);
@@ -239,7 +236,6 @@
             setStatus('ok', 'Тайминги сохранены.');
         });
 
-        // Сбросить к значениям по умолчанию
         document.getElementById('tt-tm-reset').addEventListener('click', function() {
             TIMINGS = Object.assign({}, DEFAULT_TIMINGS);
             Object.keys(DEFAULT_TIMINGS).forEach(function(k) {
@@ -348,7 +344,7 @@
     }
 
     // ====================================================
-    // FILL
+    // FILL — ИСПРАВЛЕНО: убран setTimeout+delete
     // ====================================================
     function doFill() {
         if (!parsed.path && !parsed.tags && !parsed.date && !parsed.caption) {
@@ -380,6 +376,9 @@
         return null;
     }
 
+    // ИСПРАВЛЕНО: убраны setTimeout и отдельный execCommand('delete').
+    // insertText при активном выделении сам удаляет выделенное и вставляет новое —
+    // это исключает двойную вставку тегов, которую вызывал разрыв между delete и insertText.
     function insertIntoDraftEditor(el, text) {
         el.focus();
         try {
@@ -389,14 +388,19 @@
             sel.removeAllRanges();
             sel.addRange(range);
             document.execCommand('selectAll', false, null);
-            document.execCommand('delete', false, null);
-            setTimeout(function() {
-                document.execCommand('insertText', false, text);
-                log('Draft.js: insertText via execCommand ok');
-            }, 50);
+            // insertText при активном выделении заменяет его одной атомарной операцией
+            const ok = document.execCommand('insertText', false, text);
+            log('Draft.js: insertText ok =', ok);
+            if (!ok) throw new Error('insertText returned false');
         } catch(e) {
-            log('insertText execCommand error:', e.message);
+            log('insertText execCommand error:', e.message, '— fallback ClipboardEvent');
             try {
+                el.focus();
+                const sel = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                sel.removeAllRanges();
+                sel.addRange(range);
                 const dt = new DataTransfer();
                 dt.setData('text/plain', text);
                 el.dispatchEvent(new ClipboardEvent('paste', {
@@ -410,8 +414,28 @@
     }
 
     // ====================================================
-    // SCHEDULE
+    // SCHEDULE — ИСПРАВЛЕНО: динамическое ожидание полей даты/времени
     // ====================================================
+
+    // Ждём появления видимого элемента по селектору (с таймаутом)
+    function waitForElement(selector, timeoutMs) {
+        return new Promise(function(resolve) {
+            const start = Date.now();
+            function check() {
+                try {
+                    const els = document.querySelectorAll(selector);
+                    for (let i = 0; i < els.length; i++) {
+                        const r = els[i].getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) { resolve(els[i]); return; }
+                    }
+                } catch(_) {}
+                if (Date.now() - start >= timeoutMs) { resolve(null); return; }
+                setTimeout(check, 150);
+            }
+            check();
+        });
+    }
+
     async function doSchedule() {
         if (!parsed.path && !parsed.date) { if (!doParse()) return false; }
         if (!parsed.date) {
@@ -469,7 +493,6 @@
             }
         }
 
-        // Метод 4: поиск по тексту среди всех role=radio
         if (!toggled) {
             const roles = document.querySelectorAll('[role="radio"]');
             log('role=radio found:', roles.length);
@@ -489,43 +512,50 @@
             return false;
         }
 
-        await sleep(TIMINGS.poslePereklucheniya);
-
         const parts = parsed.date.trim().split(' ');
         const datePart = (parts[0]||'').trim();
         const timePart = (parts[1]||'').trim();
         log('datePart:', datePart, 'timePart:', timePart);
 
+        // ИСПРАВЛЕНО: вместо статичного sleep ждём реального появления поля даты в DOM
         if (datePart) {
-            const dateInput = document.querySelector('input[type="date"]') ||
-                findVisibleInput(['[placeholder*="гггг"]','[placeholder*="YYYY"]','[placeholder*="MM/DD"]',
-                    '[class*="datePicker"] input','[class*="DatePicker"] input',
-                    '[class*="date"] input','[class*="Date"] input']);
+            setStatus('info', 'Жду поле даты…');
+            const dateInput = await waitForElement(
+                'input[type="date"], [class*="datePicker"] input, [class*="DatePicker"] input, ' +
+                '[placeholder*="гггг"], [placeholder*="YYYY"], [placeholder*="MM/DD"], ' +
+                '[class*="date"] input, [class*="Date"] input',
+                TIMINGS.poslePereklucheniya
+            );
             if (dateInput) {
                 let fmt = datePart;
                 if (dateInput.type !== 'date' && /^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
-                    const parts2 = datePart.split('-');
-                    fmt = parts2[1]+'/'+parts2[2]+'/'+parts2[0];
+                    const p2 = datePart.split('-');
+                    fmt = p2[1]+'/'+p2[2]+'/'+p2[0];
                 }
                 setNativeValue(dateInput, fmt);
                 log('date set:', fmt);
             } else {
-                log('date input not found after schedule toggle');
+                log('date input not found after waiting', TIMINGS.poslePereklucheniya, 'ms');
+                setStatus('warn', 'Поле даты не появилось. Попробуй увеличить тайминг "Макс. ожидание полей".');
             }
         }
 
         await sleep(TIMINGS.posleDaty);
 
+        // ИСПРАВЛЕНО: аналогично ждём поле времени
         if (timePart) {
-            const timeInput = document.querySelector('input[type="time"]') ||
-                findVisibleInput(['[placeholder*="HH"]','[placeholder*="чч"]',
-                    '[class*="timePicker"] input','[class*="TimePicker"] input',
-                    '[class*="time"] input']);
+            setStatus('info', 'Жду поле времени…');
+            const timeInput = await waitForElement(
+                'input[type="time"], [class*="timePicker"] input, [class*="TimePicker"] input, ' +
+                '[placeholder*="HH"], [placeholder*="чч"], [class*="time"] input',
+                TIMINGS.poslePereklucheniya
+            );
             if (timeInput) {
                 setNativeValue(timeInput, timePart);
                 log('time set:', timePart);
             } else {
                 log('time input not found');
+                setStatus('warn', 'Поле времени не найдено.');
             }
         }
 
@@ -547,6 +577,8 @@
         return null;
     }
 
+    // ИСПРАВЛЕНО: добавлены blur, keyup и симуляция Tab —
+    // кастомный datepicker TikTok требует blur для применения введённого значения
     function setNativeValue(el, value) {
         el.focus();
         const proto = el.tagName==='INPUT'
@@ -555,9 +587,12 @@
         const desc = Object.getOwnPropertyDescriptor(proto, 'value');
         if (desc && desc.set) desc.set.call(el, value);
         else el.value = value;
-        el.dispatchEvent(new Event('input',{bubbles:true}));
-        el.dispatchEvent(new Event('change',{bubbles:true}));
-        el.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter',keyCode:13}));
+        el.dispatchEvent(new Event('input',  {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+        el.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, key:'Enter', keyCode:13}));
+        el.dispatchEvent(new KeyboardEvent('keyup',   {bubbles:true, key:'Enter', keyCode:13}));
+        el.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, key:'Tab',   keyCode:9}));
+        el.dispatchEvent(new Event('blur',   {bubbles:true}));
     }
 
     // ====================================================
